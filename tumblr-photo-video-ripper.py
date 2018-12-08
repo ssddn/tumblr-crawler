@@ -62,6 +62,7 @@ class DownloadWorker(Thread):
     def run(self):
         while True:
             medium_type, post, target_folder = self.queue.get()
+            print("Queue current size is %d" % self.queue.qsize())
             self.download(medium_type, post, target_folder)
             self.queue.task_done()
 
@@ -164,7 +165,7 @@ class CrawlerScheduler(object):
 
     def download_media(self, site):
         self.download_photos(site)
-        self.download_videos(site)
+        # self.download_videos(site)
 
     def download_videos(self, site):
         self._download_media(site, "video", START)
@@ -181,7 +182,7 @@ class CrawlerScheduler(object):
         print("Finish Downloading All the photos from %s" % site)
 
     def _download_media(self, site, medium_type, start):
-        current_folder = os.getcwd()
+        current_folder = os.path.dirname(os.getcwd())
         target_folder = os.path.join(current_folder, site)
         if not os.path.isdir(target_folder):
             os.mkdir(target_folder)
@@ -190,8 +191,16 @@ class CrawlerScheduler(object):
         start = START
         while True:
             media_url = base_url.format(site, medium_type, MEDIA_NUM, start)
-            response = requests.get(media_url,
-                                    proxies=self.proxies)
+            print(media_url)
+            retry_times = 0
+            while retry_times < RETRY:
+                try:
+                    response = requests.get(media_url, proxies=self.proxies)
+                    break
+                except:
+                    pass
+                retry_times += 1
+
             if response.status_code == 404:
                 print("Site %s does not exist" % site)
                 break
@@ -230,21 +239,11 @@ def usage():
           "Sample File Content:\nsite1,site2\n\n"
           "Or use command line options:\n\n"
           "Sample:\npython tumblr-photo-video-ripper.py site1,site2\n\n\n")
-    print(u"未找到sites.txt文件，请创建.\n"
-          u"请在文件中指定Tumblr站点名，并以 逗号/空格/tab/表格鍵/回车符 分割，支持多行.\n"
-          u"保存文件并重试.\n\n"
-          u"例子: site1,site2\n\n"
-          u"或者直接使用命令行参数指定站点\n"
-          u"例子: python tumblr-photo-video-ripper.py site1,site2")
-
 
 def illegal_json():
     print("Illegal JSON format in file 'proxies.json'.\n"
           "Please refer to 'proxies_sample1.json' and 'proxies_sample2.json'.\n"
           "And go to http://jsonlint.com/ for validation.\n\n\n")
-    print(u"文件proxies.json格式非法.\n"
-          u"请参照示例文件'proxies_sample1.json'和'proxies_sample2.json'.\n"
-          u"然后去 http://jsonlint.com/ 进行验证.")
 
 
 def parse_sites(filename):
