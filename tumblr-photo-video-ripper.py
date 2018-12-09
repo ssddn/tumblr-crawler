@@ -4,11 +4,11 @@ import os
 import sys
 import requests
 import xmltodict
+import time
 from six.moves import queue as Queue
 from threading import Thread
 import re
 import json
-
 
 # Setting timeout
 TIMEOUT = 10
@@ -20,11 +20,67 @@ RETRY = 5
 START = 0
 
 # Numbers of photos/videos per page
-MEDIA_NUM = 50
+PHOTO_MEDIA_NUM = 50
+
+VIDEO_MEDIA_NUM = 50
 
 # Numbers of downloading threads concurrently
 THREADS = 10
 
+def download_video(proxies, medium_url, file_path):
+    total = 0
+    size = 0
+    headers = {
+        'Range': 'bytes=0-4'
+    }
+    try:
+        r = requests.head(medium_url, 
+                            stream=True,
+                            headers=headers, 
+                            proxies=proxies, 
+                            timeout=TIMEOUT)
+        crange = r.headers['content-range']
+        total = int(re.match(ur'^bytes 0-4/(\d+)$', crange).group(1))
+    except:
+        print("Failed to download %s .\n" % (medium_url))
+        return
+
+    retry_times = 0
+    while retry_times < RETRY:
+        if os.path.isfile(file_path):
+            try:
+                size = os.path.getsize(file_path)
+            except:
+                pass
+            finally:
+                headers['Range'] = "bytes=%d-" % (size, )
+        else:
+            with open(file_path, 'wb') as fh:
+                headers['Range'] = "bytes=0-"
+        
+        if size == total:
+            print("Already download finish.\n")
+            return
+
+        print("Downloading %s .\n" % (medium_url))
+        try:
+            resp = requests.get(medium_url,
+                                stream=True,
+                                headers=headers,
+                                proxies=proxies,
+                                timeout=TIMEOUT)
+            if resp.status_code == 403:
+                retry_times = RETRY
+                print("Access Denied when retrieve %s.\n" % medium_url)
+                raise Exception("Access Denied")
+            with open(file_path, 'ab') as fh:
+                for chunk in resp.iter_content(chunk_size=1024):
+                    if chunk:
+                        fh.write(chunk)
+            break
+        except:
+            pass
+        retry_times += 1
 
 def video_hd_match():
     hd_pattern = re.compile(r'.*"hdUrl":("([^\s,]*)"|false),')
@@ -38,7 +94,6 @@ def video_hd_match():
             return None
     return match
 
-
 def video_default_match():
     default_pattern = re.compile(r'.*src="(\S*)" ', re.DOTALL)
 
@@ -50,7 +105,6 @@ def video_default_match():
             except:
                 return None
     return match
-
 
 class DownloadWorker(Thread):
     def __init__(self, queue, proxies=None):
@@ -111,6 +165,10 @@ class DownloadWorker(Thread):
             medium_url = 'https://vt.tumblr.com/' + medium_name
 
         file_path = os.path.join(target_folder, medium_name)
+        if medium_type == "video":
+            download_video(self.proxies, medium_url, file_path)
+            return
+
         if not os.path.isfile(file_path):
             print("Downloading %s from %s.\n" % (medium_name,
                                                  medium_url))
@@ -127,7 +185,9 @@ class DownloadWorker(Thread):
                         raise Exception("Access Denied")
                     with open(file_path, 'wb') as fh:
                         for chunk in resp.iter_content(chunk_size=1024):
-                            fh.write(chunk)
+                            if chunk:
+                                fh.write(chunk)
+                                fh.flush()
                     break
                 except:
                     # try again
@@ -162,24 +222,27 @@ class CrawlerScheduler(object):
 
         for site in self.sites:
             self.download_media(site)
+        self.queue.join()
 
     def download_media(self, site):
+        self.download_videos(site)
         self.download_photos(site)
-        # self.download_videos(site)
+        # self.queue.join()
+        # print("Finish Downloading All the media from %s" % site)
 
     def download_videos(self, site):
         self._download_media(site, "video", START)
         # wait for the queue to finish processing all the tasks from one
         # single site
-        self.queue.join()
-        print("Finish Downloading All the videos from %s" % site)
+        # self.queue.join()
+        # print("Finish Downloading All the videos from %s" % site)
 
     def download_photos(self, site):
         self._download_media(site, "photo", START)
         # wait for the queue to finish processing all the tasks from one
         # single site
-        self.queue.join()
-        print("Finish Downloading All the photos from %s" % site)
+        # self.queue.join()
+        # print("Finish Downloading All the photos from %s" % site)
 
     def _download_media(self, site, medium_type, start):
         current_folder = os.path.dirname(os.getcwd())
@@ -190,9 +253,13 @@ class CrawlerScheduler(object):
         base_url = "https://{0}.tumblr.com/api/read?type={1}&num={2}&start={3}"
         start = START
         while True:
-            media_url = base_url.format(site, medium_type, MEDIA_NUM, start)
+            media_num = PHOTO_MEDIA_NUM
+            if medium_type == "video":
+                media_num = VIDEO_MEDIA_NUM
+            media_url = base_url.format(site, medium_type, media_num, start)
             print(media_url)
             retry_times = 0
+            response = None
             while retry_times < RETRY:
                 try:
                     response = requests.get(media_url, proxies=self.proxies)
@@ -200,10 +267,11 @@ class CrawlerScheduler(object):
                 except:
                     pass
                 retry_times += 1
-
-            if response.status_code == 404:
+                time.sleep(1)
+            
+            if response == None or response.status_code == 404:
                 print("Site %s does not exist" % site)
-                break
+                return
 
             try:
                 xml_cleaned = re.sub(u'[^\x20-\x7f]+',
@@ -220,7 +288,9 @@ class CrawlerScheduler(object):
                         # select the largest resolution
                         # usually in the first element
                         self.queue.put((medium_type, post, target_folder))
-                start += MEDIA_NUM
+                start += media_num
+                if start >= 50:
+                    break
             except KeyError:
                 break
             except UnicodeDecodeError:
